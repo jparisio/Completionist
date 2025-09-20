@@ -2,8 +2,7 @@ import {
   ButtonItem,
   PanelSection,
   PanelSectionRow,
-  Navigation,
-  staticClasses
+  staticClasses,
 } from "@decky/ui";
 import {
   addEventListener,
@@ -11,105 +10,235 @@ import {
   callable,
   definePlugin,
   toaster,
-  // routerHook
-} from "@decky/api"
+} from "@decky/api";
 import { useState } from "react";
-import { FaShip } from "react-icons/fa";
+import { FaTrophy } from "react-icons/fa";
 
-// import logo from "../assets/logo.png";
-
-// This function calls the python function "add", which takes in two numbers and returns their sum (as a number)
-// Note the type annotations:
-//  the first one: [first: number, second: number] is for the arguments
-//  the second one: number is for the return value
-const add = callable<[first: number, second: number], number>("add");
-
-// This function calls the python function "start_timer", which takes in no arguments and returns nothing.
-// It starts a (python) timer which eventually emits the event 'timer_event'
-const startTimer = callable<[], void>("start_timer");
+// Backend API calls
+const getCompletedGames = callable<[], string[]>("get_completed_games");
+const scanLibraryForCompletions = callable<[], Record<string, boolean>>(
+  "scan_library_for_completions"
+);
 
 function Content() {
-  const [result, setResult] = useState<number | undefined>();
+  const [completedGames, setCompletedGames] = useState<string[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
 
-  const onClick = async () => {
-    const result = await add(Math.random(), Math.random());
-    setResult(result);
+  const loadCompletedGames = async () => {
+    setIsLoading(true);
+    try {
+      const completed = await getCompletedGames();
+      setCompletedGames(completed);
+      toaster.toast({
+        title: "Completionist",
+        body: `Found ${completed.length} 100% completed games`,
+      });
+    } catch (error) {
+      toaster.toast({
+        title: "Error",
+        body: "Failed to load completed games",
+      });
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const scanLibrary = async () => {
+    setIsLoading(true);
+    try {
+      const completionData = await scanLibraryForCompletions();
+
+      const completed = Object.entries(completionData)
+        .filter(([_, isCompleted]) => isCompleted)
+        .map(([appId, _]) => appId);
+
+      setCompletedGames(completed);
+
+      toaster.toast({
+        title: "Completionist",
+        body: `Scanned library and found ${completed.length} completed games`,
+      });
+    } catch (error) {
+      toaster.toast({
+        title: "Error",
+        body: "Failed to scan library for completions",
+      });
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   return (
-    <PanelSection title="Panel Section">
+    <PanelSection title="Completionist Settings">
       <PanelSectionRow>
         <ButtonItem
           layout="below"
-          onClick={onClick}
+          onClick={loadCompletedGames}
+          disabled={isLoading}
         >
-          {result ?? "Add two numbers via Python"}
-        </ButtonItem>
-      </PanelSectionRow>
-      <PanelSectionRow>
-        <ButtonItem
-          layout="below"
-          onClick={() => startTimer()}
-        >
-          {"Start Python timer"}
+          {isLoading ? "Loading..." : "Load Completed Games"}
         </ButtonItem>
       </PanelSectionRow>
 
-      {/* <PanelSectionRow>
-        <div style={{ display: "flex", justifyContent: "center" }}>
-          <img src={logo} />
+      <PanelSectionRow>
+        <ButtonItem layout="below" onClick={scanLibrary} disabled={isLoading}>
+          {isLoading ? "Scanning..." : "Scan Library for Completions"}
+        </ButtonItem>
+      </PanelSectionRow>
+
+      <PanelSectionRow>
+        <div style={{ padding: "8px 0" }}>
+          <strong>Completed Games: {completedGames.length}</strong>
+          {completedGames.length > 0 && (
+            <div style={{ marginTop: "8px", fontSize: "12px" }}>
+              {completedGames.map((appId) => (
+                <div key={appId}>App ID: {appId}</div>
+              ))}
+            </div>
+          )}
         </div>
-      </PanelSectionRow> */}
-
-      {/*<PanelSectionRow>
-        <ButtonItem
-          layout="below"
-          onClick={() => {
-            Navigation.Navigate("/decky-plugin-test");
-            Navigation.CloseSideMenus();
-          }}
-        >
-          Router
-        </ButtonItem>
-      </PanelSectionRow>*/}
+      </PanelSectionRow>
     </PanelSection>
   );
-};
+}
 
 export default definePlugin(() => {
-  console.log("Template plugin initializing, this is called once on frontend startup")
+  console.log(
+    "Completionist plugin initializing, this is called once on frontend startup"
+  );
 
-  // serverApi.routerHook.addRoute("/decky-plugin-test", DeckyPluginRouterTest, {
-  //   exact: true,
-  // });
+  let patches: any[] = [];
+  let completedGames: Set<string> = new Set();
+
+  // Function to update completed games from backend
+  const updateCompletedGames = async () => {
+    try {
+      // First try to scan the library for fresh data
+      const completionData = await scanLibraryForCompletions();
+      const completed = Object.entries(completionData)
+        .filter(([_, isCompleted]) => isCompleted)
+        .map(([appId, _]) => appId);
+
+      completedGames = new Set(completed);
+      console.log("Updated completed games:", completed);
+    } catch (error) {
+      console.error("Failed to update completed games:", error);
+      // Fall back to cached data
+      try {
+        const completed = await getCompletedGames();
+        completedGames = new Set(completed);
+        console.log("Using cached completed games:", completed);
+      } catch (fallbackError) {
+        console.error("Failed to get cached completed games:", fallbackError);
+      }
+    }
+  };
+
+  // Function to inject trophy overlays into game tiles
+  const injectTrophyOverlays = () => {
+    try {
+      // This is a simplified approach - in a real implementation,
+      // we'd need to find the specific library modules and patch them
+      const gameElements = document.querySelectorAll("[data-appid]");
+
+      gameElements.forEach((element) => {
+        const appId = element.getAttribute("data-appid");
+        if (appId && completedGames.has(appId)) {
+          // Check if trophy overlay already exists
+          if (!element.querySelector(".completionist-trophy")) {
+            const trophyDiv = document.createElement("div");
+            trophyDiv.className = "completionist-trophy";
+            trophyDiv.style.cssText = `
+              position: absolute;
+              bottom: 8px;
+              left: 8px;
+              background-color: rgba(0, 0, 0, 0.8);
+              border-radius: 50%;
+              width: 24px;
+              height: 24px;
+              display: flex;
+              align-items: center;
+              justify-content: center;
+              z-index: 1000;
+              color: #FFD700;
+              font-size: 14px;
+            `;
+            trophyDiv.innerHTML = "🏆";
+
+            // Make sure the parent has relative positioning
+            if (element instanceof HTMLElement) {
+              element.style.position = "relative";
+              element.appendChild(trophyDiv);
+            }
+          }
+        }
+      });
+    } catch (error) {
+      console.error("Error injecting trophy overlays:", error);
+    }
+  };
+
+  // Periodically check for new game elements and inject trophies
+  let intervalId: NodeJS.Timeout;
+
+  // Initialize the plugin
+  const initialize = async () => {
+    await updateCompletedGames();
+
+    // Set up periodic checking for game elements
+    intervalId = setInterval(() => {
+      injectTrophyOverlays();
+    }, 2000);
+
+    // Initial injection
+    setTimeout(injectTrophyOverlays, 1000);
+  };
+
+  // Start initialization
+  initialize();
 
   // Add an event listener to the "timer_event" event from the backend
-  const listener = addEventListener<[
-    test1: string,
-    test2: boolean,
-    test3: number
-  ]>("timer_event", (test1, test2, test3) => {
-    console.log("Template got timer_event with:", test1, test2, test3)
+  const listener = addEventListener<
+    [test1: string, test2: boolean, test3: number]
+  >("timer_event", (test1, test2, test3) => {
+    console.log("Completionist got timer_event with:", test1, test2, test3);
     toaster.toast({
-      title: "template got timer_event",
-      body: `${test1}, ${test2}, ${test3}`
+      title: "completionist got timer_event",
+      body: `${test1}, ${test2}, ${test3}`,
     });
   });
 
   return {
     // The name shown in various decky menus
-    name: "Test Plugin",
+    name: "Completionist",
     // The element displayed at the top of your plugin's menu
-    titleView: <div className={staticClasses.Title}>Decky Example Plugin</div>,
+    titleView: <div className={staticClasses.Title}>Completionist</div>,
     // The content of your plugin's menu
     content: <Content />,
     // The icon displayed in the plugin list
-    icon: <FaShip />,
+    icon: <FaTrophy />,
     // The function triggered when your plugin unloads
     onDismount() {
-      console.log("Unloading")
+      console.log("Unloading Completionist plugin");
+
+      // Clear interval
+      if (intervalId) {
+        clearInterval(intervalId);
+      }
+
+      // Remove all trophy overlays
+      document
+        .querySelectorAll(".completionist-trophy")
+        .forEach((el) => el.remove());
+
+      // Unpatch any patches
+      patches.forEach((patch) => {
+        if (patch && typeof patch.unpatch === "function") {
+          patch.unpatch();
+        }
+      });
+
       removeEventListener("timer_event", listener);
-      // serverApi.routerHook.removeRoute("/decky-plugin-test");
     },
   };
 });
