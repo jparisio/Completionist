@@ -24,11 +24,8 @@ class Plugin:
             # Simulate some games having 100% completion for demonstration
             # In real implementation, this would query Steam's achievement API
             simulated_completions = {
-                "440": {"total_achievements": 34, "unlocked_achievements": 34},  # TF2 (simulated complete)
-                "730": {"total_achievements": 167, "unlocked_achievements": 120}, # CS2 (simulated incomplete)
-                "570": {"total_achievements": 81, "unlocked_achievements": 81},   # Dota 2 (simulated complete)
-                "620": {"total_achievements": 15, "unlocked_achievements": 15},   # Portal 2 (simulated complete)
-                "1089980": {"total_achievements": 12, "unlocked_achievements": 12}, # Steamworks Demo (simulated complete)
+                "1030300": {"total_achievements": 42, "unlocked_achievements": 42},  # Hollow Knight: Silksong (simulated complete)
+                "607080": {"total_achievements": 34, "unlocked_achievements": 34},   # Psychonauts 2 (simulated complete)
             }
             
             achievement_data = simulated_completions.get(app_id, {
@@ -74,12 +71,10 @@ class Plugin:
     async def get_sample_library_games(self) -> List[str]:
         """Get a sample list of library games for testing"""
         # In a real implementation, this would query Steam's library API
-        # For now, return some common game app IDs for testing
+        # For now, return only Silksong and Psychonauts 2 for testing
         sample_games = [
-            "607080",   # psychonauts 2
-            "730",      # Counter-Strike 2
-            "620",      # Portal 2
-            "1030300", # silksong
+            "1030300",  # Hollow Knight: Silksong
+            "607080",   # Psychonauts 2
         ]
         return sample_games
     
