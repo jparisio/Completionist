@@ -13,6 +13,7 @@ import {
 } from "@decky/api";
 import { useState } from "react";
 import { FaTrophy } from "react-icons/fa";
+import trophyImage from "../assets/trophy.png";
 
 // Backend API calls
 const getCompletedGames = callable<[], string[]>("get_completed_games");
@@ -152,18 +153,25 @@ export default definePlugin(() => {
               position: absolute;
               bottom: 8px;
               left: 8px;
-              background-color: rgba(0, 0, 0, 0.8);
-              border-radius: 50%;
-              width: 24px;
-              height: 24px;
+              width: 28px;
+              height: 28px;
+              z-index: 1000;
               display: flex;
               align-items: center;
               justify-content: center;
-              z-index: 1000;
-              color: #FFD700;
-              font-size: 14px;
             `;
-            trophyDiv.innerHTML = "🏆";
+
+            const trophyImg = document.createElement("img");
+            trophyImg.src = trophyImage;
+            trophyImg.style.cssText = `
+              width: 100%;
+              height: 100%;
+              object-fit: contain;
+              filter: drop-shadow(0 2px 4px rgba(0,0,0,0.8));
+            `;
+            trophyImg.alt = "100% Complete";
+
+            trophyDiv.appendChild(trophyImg);
 
             // Make sure the parent has relative positioning
             if (element instanceof HTMLElement) {
