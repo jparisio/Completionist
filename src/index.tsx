@@ -5,12 +5,85 @@ import {
   staticClasses,
   findSP,
 } from "@decky/ui";
-import { definePlugin } from "@decky/api";
-import { useState } from "react";
+import { definePlugin, callable } from "@decky/api";
+import { useEffect, useReducer } from "react";
 import { FaTrophy } from "react-icons/fa";
 import trophyImage from "../assets/platinum.png";
 
 const CONCURRENT_REQUESTS = 5;
+const STYLE_ID = "completionist-overlay-style";
+
+// Python backend RPCs (see main.py)
+const getPlatinums = callable<[], number[]>("get_platinums");
+const setPlatinums = callable<[appids: number[]], boolean>("set_platinums");
+
+// ---------- Module-level shared scan state ----------
+// One source of truth that both the auto-scan-on-init and the Refresh button
+// read from. Any subscriber (the Content panel) is notified on every change.
+
+interface ScanState {
+  scanning: boolean;
+  progress: { scanned: number; total: number; found: number } | null;
+  results: SteamApp[];
+  error: string | null;
+}
+
+const state: ScanState = {
+  scanning: false,
+  progress: null,
+  results: [],
+  error: null,
+};
+
+const listeners = new Set<() => void>();
+function subscribe(l: () => void): () => void {
+  listeners.add(l);
+  return () => {
+    listeners.delete(l);
+  };
+}
+function notify() {
+  for (const l of listeners) l();
+}
+
+// Single in-flight scan promise — a second caller joins instead of duplicating.
+let activeScan: Promise<SteamApp[]> | null = null;
+
+function runScan(): Promise<SteamApp[]> {
+  if (activeScan) return activeScan;
+  state.scanning = true;
+  state.error = null;
+  state.progress = null;
+  notify();
+
+  activeScan = scanPlatinums((scanned, total, found) => {
+    state.progress = { scanned, total, found };
+    notify();
+  })
+    .then((results) => {
+      state.results = results;
+      state.progress = null;
+      installOverlayStyle(results.map((a) => a.appid));
+      setPlatinums(results.map((a) => a.appid)).catch((e) =>
+        console.error("Completionist: setPlatinums failed:", e)
+      );
+      console.log(`Completionist: scan saved ${results.length} platinum(s) to disk`);
+      return results;
+    })
+    .catch((e) => {
+      state.error = String(e);
+      throw e;
+    })
+    .finally(() => {
+      state.scanning = false;
+      activeScan = null;
+      notify();
+    });
+
+  return activeScan;
+}
+
+// ---------- Scanner ----------
 
 async function scanPlatinums(
   onProgress: (scanned: number, total: number, found: number) => void
@@ -43,97 +116,11 @@ async function scanPlatinums(
     }
   }
 
-  await Promise.all(
-    Array.from({ length: CONCURRENT_REQUESTS }, () => worker())
-  );
+  await Promise.all(Array.from({ length: CONCURRENT_REQUESTS }, () => worker()));
   return platinums.sort((a, b) => a.display_name.localeCompare(b.display_name));
 }
 
-function Content() {
-  const [scanning, setScanning] = useState(false);
-  const [progress, setProgress] = useState<{ scanned: number; total: number; found: number } | null>(null);
-  const [platinums, setPlatinums] = useState<SteamApp[]>([]);
-  const [error, setError] = useState<string | null>(null);
-
-  async function runScan() {
-    setScanning(true);
-    setError(null);
-    setPlatinums([]);
-    setProgress(null);
-    try {
-      const results = await scanPlatinums((scanned, total, found) =>
-        setProgress({ scanned, total, found })
-      );
-      setPlatinums(results);
-      installOverlayStyle(results.map((a) => a.appid));
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setScanning(false);
-    }
-  }
-
-  const visible = platinums.slice(0, 20);
-  const hidden = platinums.length - visible.length;
-
-  return (
-    <PanelSection title="Completionist">
-      <PanelSectionRow>
-        <ButtonItem layout="below" onClick={runScan} disabled={scanning}>
-          {scanning ? "Scanning..." : "Scan for platinum games"}
-        </ButtonItem>
-      </PanelSectionRow>
-
-      {progress && (
-        <PanelSectionRow>
-          <div>
-            {progress.scanned} / {progress.total} checked · {progress.found} platinum
-          </div>
-        </PanelSectionRow>
-      )}
-
-      {error && (
-        <PanelSectionRow>
-          <div style={{ color: "tomato" }}>Error: {error}</div>
-        </PanelSectionRow>
-      )}
-
-      {!scanning && platinums.length > 0 && (
-        <PanelSectionRow>
-          <div style={{ fontWeight: "bold" }}>
-            {platinums.length} platinum game{platinums.length === 1 ? "" : "s"}:
-          </div>
-        </PanelSectionRow>
-      )}
-
-      {!scanning &&
-        visible.map((app) => (
-          <PanelSectionRow key={app.appid}>
-            <div>
-              {app.display_name}{" "}
-              <span style={{ opacity: 0.5 }}>({app.appid})</span>
-            </div>
-          </PanelSectionRow>
-        ))}
-
-      {!scanning && hidden > 0 && (
-        <PanelSectionRow>
-          <div style={{ opacity: 0.6 }}>… and {hidden} more</div>
-        </PanelSectionRow>
-      )}
-    </PanelSection>
-  );
-}
-
-// ====================================================================
-// Phase 3: CSS-injected overlay on every game tile.
-// We locate Steam's library-asset CSS class via findModule and append a
-// pseudo-element via CSS. No React patching means no re-render risk.
-// Phase 4 will scope this to platinum-only via [data-appid] attribute
-// selectors, with one CSS rule per platinum appid.
-// ====================================================================
-
-const STYLE_ID = "completionist-overlay-style";
+// ---------- CSS overlay ----------
 
 function installOverlayStyle(platinumAppIds: number[] = []) {
   const doc = findSP().window.document;
@@ -146,20 +133,32 @@ function installOverlayStyle(platinumAppIds: number[] = []) {
 
   if (platinumAppIds.length === 0) {
     el.textContent = "";
-    console.log("Completionist: no platinums to render yet");
     return;
   }
 
-  // Steam exposes the appid on the outer tile container as `data-id`. That
-  // container already has `position: absolute` so ::after positions relative
-  // to it. The outer tile is OUTSIDE the asset image (no splash mirror) and
-  // a sibling layer of the badge area (won't cover Steam Deck verified).
-  const selectorList = platinumAppIds
-    .map((appid) => `[data-id="${appid}"]::after`)
-    .join(", ");
+  // For each platinum game, target the .Panel that's a direct parent of
+  // a role=link containing the matching img. On home this matches the inner
+  // tilting Panel (so the trophy tilts with the card). On library it matches
+  // the outer tile wrapper. Single selector pattern covers both surfaces.
+  // Four img-src patterns observed in the wild:
+  //   /apps/<appid>/...           — Steam CDN URL
+  //   /assets/<appid>/...         — steamloopback.host local cache
+  //   /customimages/<appid>p.png  — SteamGridDB portrait custom art
+  //   /customimages/<appid>l.png  — SteamGridDB landscape custom art
+  const baseSelectors = platinumAppIds.flatMap((id) => [
+    `.Panel:has(> [role="link"] img[src*="/apps/${id}/"])`,
+    `.Panel:has(> [role="link"] img[src*="/assets/${id}/"])`,
+    `.Panel:has(> [role="link"] img[src*="/customimages/${id}p"])`,
+    `.Panel:has(> [role="link"] img[src*="/customimages/${id}l"])`,
+  ]);
+  const positionSel = baseSelectors.join(",\n");
+  const afterSel = baseSelectors.map((s) => `${s}::after`).join(",\n");
 
   el.textContent = `
-    ${selectorList} {
+    ${positionSel} {
+      position: relative;
+    }
+    ${afterSel} {
       content: "";
       position: absolute;
       top: 4px;
@@ -171,26 +170,99 @@ function installOverlayStyle(platinumAppIds: number[] = []) {
       pointer-events: none;
     }
   `;
-  console.log(
-    `Completionist: overlay installed via data-id for ${platinumAppIds.length} platinum game(s)`
-  );
 }
 
 function removeOverlayStyle() {
   try {
-    const doc = findSP().window.document;
-    doc.getElementById(STYLE_ID)?.remove();
+    findSP().window.document.getElementById(STYLE_ID)?.remove();
   } catch (e) {
     console.error("Completionist: removeOverlayStyle failed:", e);
   }
 }
 
+// ---------- React panel ----------
+
+function Content() {
+  // useReducer forces a re-render whenever the module state notifies us.
+  const [, force] = useReducer((x: number) => x + 1, 0);
+  useEffect(() => subscribe(force), []);
+
+  const visible = state.results.slice(0, 20);
+  const hidden = state.results.length - visible.length;
+
+  return (
+    <PanelSection title="Completionist">
+      <PanelSectionRow>
+        <ButtonItem
+          layout="below"
+          onClick={() => runScan()}
+          disabled={state.scanning}
+        >
+          {state.scanning ? "Scanning..." : "Refresh"}
+        </ButtonItem>
+      </PanelSectionRow>
+
+      {state.progress && (
+        <PanelSectionRow>
+          <div>
+            {state.progress.scanned} / {state.progress.total} checked ·{" "}
+            {state.progress.found} platinum
+          </div>
+        </PanelSectionRow>
+      )}
+
+      {state.error && (
+        <PanelSectionRow>
+          <div style={{ color: "tomato" }}>Error: {state.error}</div>
+        </PanelSectionRow>
+      )}
+
+      {!state.scanning && state.results.length > 0 && (
+        <PanelSectionRow>
+          <div style={{ fontWeight: "bold" }}>
+            {state.results.length} platinum game{state.results.length === 1 ? "" : "s"}:
+          </div>
+        </PanelSectionRow>
+      )}
+
+      {!state.scanning &&
+        visible.map((app) => (
+          <PanelSectionRow key={app.appid}>
+            <div>{app.display_name}</div>
+          </PanelSectionRow>
+        ))}
+
+      {!state.scanning && hidden > 0 && (
+        <PanelSectionRow>
+          <div style={{ opacity: 0.6 }}>… and {hidden} more</div>
+        </PanelSectionRow>
+      )}
+    </PanelSection>
+  );
+}
+
+// ---------- Plugin entry ----------
+
 export default definePlugin(() => {
   console.log("Completionist initializing");
-  // Install just the position:relative on tiles. The platinum-targeted
-  // overlay rules get added when the user clicks "Scan" — auto-scan on
-  // load was competing with the manual scan over Steam IPC.
-  installOverlayStyle();
+
+  // 1. Apply cached platinums from disk immediately (instant trophies on boot).
+  // 2. Then kick off a background scan to catch any new platinums.
+  // Both share the module-level lock + state, so the Content panel shows
+  // progress regardless of which path triggered the work.
+  getPlatinums()
+    .then((cached) => {
+      if (cached.length > 0) {
+        installOverlayStyle(cached);
+        console.log(`Completionist: applied ${cached.length} cached platinum(s) instantly`);
+      }
+    })
+    .catch((e) => console.error("Completionist: getPlatinums failed:", e))
+    .finally(() => {
+      runScan().catch((e) =>
+        console.error("Completionist: background scan failed:", e)
+      );
+    });
 
   return {
     name: "Completionist",
