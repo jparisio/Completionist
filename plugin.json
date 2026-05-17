@@ -1,11 +1,11 @@
 {
   "name": "Completionist",
   "author": "Justin Parisio",
-  "flags": ["debug"],
+  "flags": [],
   "api_version": 1,
   "publish": {
-    "tags": ["trophy", "achievements", "completion"],
-    "description": "Renders a platinum trophy on game tiles for fully-completed games.",
-    "image": "https://opengraph.githubassets.com/1/SteamDeckHomebrew/PluginLoader"
+    "tags": ["achievements", "completion", "library", "qol"],
+    "description": "Displays a platinum trophy on the tiles of Steam games you've 100% completed. Detection runs automatically against Steam's local achievement data — no API key, no setup. Position and size are configurable.",
+    "image": "https://raw.githubusercontent.com/jparisio/Completionist/main/assets/store-banner.png"
   }
 }
