@@ -1,7 +1,14 @@
-import { ButtonItem, PanelSection, PanelSectionRow, staticClasses } from "@decky/ui";
+import {
+  ButtonItem,
+  PanelSection,
+  PanelSectionRow,
+  staticClasses,
+  findSP,
+} from "@decky/ui";
 import { definePlugin } from "@decky/api";
 import { useState } from "react";
 import { FaTrophy } from "react-icons/fa";
+import trophyImage from "../assets/platinum.png";
 
 const CONCURRENT_REQUESTS = 5;
 
@@ -58,6 +65,7 @@ function Content() {
         setProgress({ scanned, total, found })
       );
       setPlatinums(results);
+      installOverlayStyle(results.map((a) => a.appid));
     } catch (e) {
       setError(String(e));
     } finally {
@@ -117,8 +125,73 @@ function Content() {
   );
 }
 
+// ====================================================================
+// Phase 3: CSS-injected overlay on every game tile.
+// We locate Steam's library-asset CSS class via findModule and append a
+// pseudo-element via CSS. No React patching means no re-render risk.
+// Phase 4 will scope this to platinum-only via [data-appid] attribute
+// selectors, with one CSS rule per platinum appid.
+// ====================================================================
+
+const STYLE_ID = "completionist-overlay-style";
+
+function installOverlayStyle(platinumAppIds: number[] = []) {
+  const doc = findSP().window.document;
+  let el = doc.getElementById(STYLE_ID) as HTMLStyleElement | null;
+  if (!el) {
+    el = doc.createElement("style");
+    el.id = STYLE_ID;
+    doc.head.appendChild(el);
+  }
+
+  if (platinumAppIds.length === 0) {
+    el.textContent = "";
+    console.log("Completionist: no platinums to render yet");
+    return;
+  }
+
+  // Steam exposes the appid on the outer tile container as `data-id`. That
+  // container already has `position: absolute` so ::after positions relative
+  // to it. The outer tile is OUTSIDE the asset image (no splash mirror) and
+  // a sibling layer of the badge area (won't cover Steam Deck verified).
+  const selectorList = platinumAppIds
+    .map((appid) => `[data-id="${appid}"]::after`)
+    .join(", ");
+
+  el.textContent = `
+    ${selectorList} {
+      content: "";
+      position: absolute;
+      top: 4px;
+      right: 4px;
+      width: 32px;
+      height: 40px;
+      background: url("${trophyImage}") center / contain no-repeat;
+      z-index: 50;
+      pointer-events: none;
+    }
+  `;
+  console.log(
+    `Completionist: overlay installed via data-id for ${platinumAppIds.length} platinum game(s)`
+  );
+}
+
+function removeOverlayStyle() {
+  try {
+    const doc = findSP().window.document;
+    doc.getElementById(STYLE_ID)?.remove();
+  } catch (e) {
+    console.error("Completionist: removeOverlayStyle failed:", e);
+  }
+}
+
 export default definePlugin(() => {
   console.log("Completionist initializing");
+  // Install just the position:relative on tiles. The platinum-targeted
+  // overlay rules get added when the user clicks "Scan" — auto-scan on
+  // load was competing with the manual scan over Steam IPC.
+  installOverlayStyle();
+
   return {
     name: "Completionist",
     titleView: <div className={staticClasses.Title}>Completionist</div>,
@@ -126,6 +199,7 @@ export default definePlugin(() => {
     icon: <FaTrophy />,
     onDismount() {
       console.log("Completionist unloading");
+      removeOverlayStyle();
     },
   };
 });
