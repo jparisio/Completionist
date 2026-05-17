@@ -240,12 +240,6 @@ function removeOverlayStyle() {
   }
 }
 
-// ---------- Live updates ----------
-// Subscribe to Steam's "achievement state changed" event so newly platinummed
-// games get a trophy without the user clicking Refresh. We debounce because a
-// game can fire several changes in a burst (e.g. boot-time sync), and our
-// runScan is heavy enough that we don't want to run it 10 times back to back.
-
 let achievementSub: SteamRegistrationHandle | null = null;
 let achievementDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 const ACHIEVEMENT_DEBOUNCE_MS = 5000;
@@ -254,7 +248,9 @@ function startAchievementListener() {
   try {
     const reg = window.SteamClient?.Apps?.RegisterForAchievementChanges;
     if (typeof reg !== "function") {
-      console.warn("Completionist: RegisterForAchievementChanges not available");
+      console.warn(
+        "Completionist: RegisterForAchievementChanges not available",
+      );
       return;
     }
     achievementSub = reg(() => {
@@ -263,7 +259,7 @@ function startAchievementListener() {
         achievementDebounceTimer = null;
         console.log("Completionist: achievement change detected — rescanning");
         runScan().catch((e) =>
-          console.error("Completionist: triggered scan failed:", e)
+          console.error("Completionist: triggered scan failed:", e),
         );
       }, ACHIEVEMENT_DEBOUNCE_MS);
     });
@@ -370,9 +366,6 @@ function Content() {
 export default definePlugin(() => {
   console.log("Completionist initializing");
 
-  // 1. Load settings + cached platinums in parallel.
-  // 2. Apply CSS immediately so trophies appear instantly on boot.
-  // 3. Kick off a background scan to catch new platinums.
   Promise.all([getSettings(), getPlatinums()])
     .then(([settings, cached]) => {
       state.settings = { ...DEFAULT_SETTINGS, ...settings };
