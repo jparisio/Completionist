@@ -1,115 +1,131 @@
-import {
-  ButtonItem,
-  PanelSection,
-  PanelSectionRow,
-  Navigation,
-  staticClasses
-} from "@decky/ui";
-import {
-  addEventListener,
-  removeEventListener,
-  callable,
-  definePlugin,
-  toaster,
-  // routerHook
-} from "@decky/api"
+import { ButtonItem, PanelSection, PanelSectionRow, staticClasses } from "@decky/ui";
+import { definePlugin } from "@decky/api";
 import { useState } from "react";
-import { FaShip } from "react-icons/fa";
+import { FaTrophy } from "react-icons/fa";
 
-// import logo from "../assets/logo.png";
+const CONCURRENT_REQUESTS = 5;
 
-// This function calls the python function "add", which takes in two numbers and returns their sum (as a number)
-// Note the type annotations:
-//  the first one: [first: number, second: number] is for the arguments
-//  the second one: number is for the return value
-const add = callable<[first: number, second: number], number>("add");
+async function scanPlatinums(
+  onProgress: (scanned: number, total: number, found: number) => void
+): Promise<SteamApp[]> {
+  const cache = window.appAchievementProgressCache;
+  const apps = [...window.appStore.allApps];
+  const total = apps.length;
+  const platinums: SteamApp[] = [];
 
-// This function calls the python function "start_timer", which takes in no arguments and returns nothing.
-// It starts a (python) timer which eventually emits the event 'timer_event'
-const startTimer = callable<[], void>("start_timer");
+  let idx = 0;
+  let scanned = 0;
+
+  async function worker() {
+    while (idx < total) {
+      const myIdx = idx++;
+      const app = apps[myIdx];
+      try {
+        if (cache.BGameHasAchievements(app.appid)) {
+          if (!cache.m_achievementProgress.mapCache.has(app.appid)) {
+            await cache.RequestCacheUpdate(app.appid);
+          }
+          const entry = cache.m_achievementProgress.mapCache.get(app.appid);
+          if (entry?.all_unlocked) platinums.push(app);
+        }
+      } catch {
+        // per-app failures shouldn't abort the scan
+      }
+      scanned++;
+      onProgress(scanned, total, platinums.length);
+    }
+  }
+
+  await Promise.all(
+    Array.from({ length: CONCURRENT_REQUESTS }, () => worker())
+  );
+  return platinums.sort((a, b) => a.display_name.localeCompare(b.display_name));
+}
 
 function Content() {
-  const [result, setResult] = useState<number | undefined>();
+  const [scanning, setScanning] = useState(false);
+  const [progress, setProgress] = useState<{ scanned: number; total: number; found: number } | null>(null);
+  const [platinums, setPlatinums] = useState<SteamApp[]>([]);
+  const [error, setError] = useState<string | null>(null);
 
-  const onClick = async () => {
-    const result = await add(Math.random(), Math.random());
-    setResult(result);
-  };
+  async function runScan() {
+    setScanning(true);
+    setError(null);
+    setPlatinums([]);
+    setProgress(null);
+    try {
+      const results = await scanPlatinums((scanned, total, found) =>
+        setProgress({ scanned, total, found })
+      );
+      setPlatinums(results);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setScanning(false);
+    }
+  }
+
+  const visible = platinums.slice(0, 20);
+  const hidden = platinums.length - visible.length;
 
   return (
-    <PanelSection title="Panel Section">
+    <PanelSection title="Completionist">
       <PanelSectionRow>
-        <ButtonItem
-          layout="below"
-          onClick={onClick}
-        >
-          {result ?? "Add two numbers via Python"}
-        </ButtonItem>
-      </PanelSectionRow>
-      <PanelSectionRow>
-        <ButtonItem
-          layout="below"
-          onClick={() => startTimer()}
-        >
-          {"Start Python timer"}
+        <ButtonItem layout="below" onClick={runScan} disabled={scanning}>
+          {scanning ? "Scanning..." : "Scan for platinum games"}
         </ButtonItem>
       </PanelSectionRow>
 
-      {/* <PanelSectionRow>
-        <div style={{ display: "flex", justifyContent: "center" }}>
-          <img src={logo} />
-        </div>
-      </PanelSectionRow> */}
+      {progress && (
+        <PanelSectionRow>
+          <div>
+            {progress.scanned} / {progress.total} checked · {progress.found} platinum
+          </div>
+        </PanelSectionRow>
+      )}
 
-      {/*<PanelSectionRow>
-        <ButtonItem
-          layout="below"
-          onClick={() => {
-            Navigation.Navigate("/decky-plugin-test");
-            Navigation.CloseSideMenus();
-          }}
-        >
-          Router
-        </ButtonItem>
-      </PanelSectionRow>*/}
+      {error && (
+        <PanelSectionRow>
+          <div style={{ color: "tomato" }}>Error: {error}</div>
+        </PanelSectionRow>
+      )}
+
+      {!scanning && platinums.length > 0 && (
+        <PanelSectionRow>
+          <div style={{ fontWeight: "bold" }}>
+            {platinums.length} platinum game{platinums.length === 1 ? "" : "s"}:
+          </div>
+        </PanelSectionRow>
+      )}
+
+      {!scanning &&
+        visible.map((app) => (
+          <PanelSectionRow key={app.appid}>
+            <div>
+              {app.display_name}{" "}
+              <span style={{ opacity: 0.5 }}>({app.appid})</span>
+            </div>
+          </PanelSectionRow>
+        ))}
+
+      {!scanning && hidden > 0 && (
+        <PanelSectionRow>
+          <div style={{ opacity: 0.6 }}>… and {hidden} more</div>
+        </PanelSectionRow>
+      )}
     </PanelSection>
   );
-};
+}
 
 export default definePlugin(() => {
-  console.log("Template plugin initializing, this is called once on frontend startup")
-
-  // serverApi.routerHook.addRoute("/decky-plugin-test", DeckyPluginRouterTest, {
-  //   exact: true,
-  // });
-
-  // Add an event listener to the "timer_event" event from the backend
-  const listener = addEventListener<[
-    test1: string,
-    test2: boolean,
-    test3: number
-  ]>("timer_event", (test1, test2, test3) => {
-    console.log("Template got timer_event with:", test1, test2, test3)
-    toaster.toast({
-      title: "template got timer_event",
-      body: `${test1}, ${test2}, ${test3}`
-    });
-  });
-
+  console.log("Completionist initializing");
   return {
-    // The name shown in various decky menus
-    name: "Test Plugin",
-    // The element displayed at the top of your plugin's menu
-    titleView: <div className={staticClasses.Title}>Decky Example Plugin</div>,
-    // The content of your plugin's menu
+    name: "Completionist",
+    titleView: <div className={staticClasses.Title}>Completionist</div>,
     content: <Content />,
-    // The icon displayed in the plugin list
-    icon: <FaShip />,
-    // The function triggered when your plugin unloads
+    icon: <FaTrophy />,
     onDismount() {
-      console.log("Unloading")
-      removeEventListener("timer_event", listener);
-      // serverApi.routerHook.removeRoute("/decky-plugin-test");
+      console.log("Completionist unloading");
     },
   };
 });
