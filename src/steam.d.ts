@@ -13,6 +13,10 @@ interface AchievementCacheEntry {
   vetted: boolean;
 }
 
+interface SteamRegistrationHandle {
+  unregister(): void;
+}
+
 interface Window {
   appStore: {
     allApps: SteamApp[];
@@ -23,6 +27,13 @@ interface Window {
     RequestCacheUpdate(appid: number): Promise<unknown>;
     m_achievementProgress: {
       mapCache: Map<number, AchievementCacheEntry>;
+    };
+  };
+  SteamClient: {
+    Apps: {
+      RegisterForAchievementChanges(
+        callback: (...args: unknown[]) => void
+      ): SteamRegistrationHandle;
     };
   };
 }

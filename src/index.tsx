@@ -240,6 +240,52 @@ function removeOverlayStyle() {
   }
 }
 
+// ---------- Live updates ----------
+// Subscribe to Steam's "achievement state changed" event so newly platinummed
+// games get a trophy without the user clicking Refresh. We debounce because a
+// game can fire several changes in a burst (e.g. boot-time sync), and our
+// runScan is heavy enough that we don't want to run it 10 times back to back.
+
+let achievementSub: SteamRegistrationHandle | null = null;
+let achievementDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+const ACHIEVEMENT_DEBOUNCE_MS = 5000;
+
+function startAchievementListener() {
+  try {
+    const reg = window.SteamClient?.Apps?.RegisterForAchievementChanges;
+    if (typeof reg !== "function") {
+      console.warn("Completionist: RegisterForAchievementChanges not available");
+      return;
+    }
+    achievementSub = reg(() => {
+      if (achievementDebounceTimer) clearTimeout(achievementDebounceTimer);
+      achievementDebounceTimer = setTimeout(() => {
+        achievementDebounceTimer = null;
+        console.log("Completionist: achievement change detected — rescanning");
+        runScan().catch((e) =>
+          console.error("Completionist: triggered scan failed:", e)
+        );
+      }, ACHIEVEMENT_DEBOUNCE_MS);
+    });
+    console.log("Completionist: subscribed to achievement changes");
+  } catch (e) {
+    console.error("Completionist: startAchievementListener failed:", e);
+  }
+}
+
+function stopAchievementListener() {
+  try {
+    achievementSub?.unregister?.();
+  } catch (e) {
+    console.error("Completionist: stopAchievementListener failed:", e);
+  }
+  achievementSub = null;
+  if (achievementDebounceTimer) {
+    clearTimeout(achievementDebounceTimer);
+    achievementDebounceTimer = null;
+  }
+}
+
 // ---------- React panel ----------
 
 const CORNER_OPTIONS = [
@@ -344,6 +390,7 @@ export default definePlugin(() => {
       runScan().catch((e) =>
         console.error("Completionist: background scan failed:", e),
       );
+      startAchievementListener();
     });
 
   return {
@@ -353,6 +400,7 @@ export default definePlugin(() => {
     icon: <FaTrophy />,
     onDismount() {
       console.log("Completionist unloading");
+      stopAchievementListener();
       removeOverlayStyle();
     },
   };
