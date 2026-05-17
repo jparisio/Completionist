@@ -1,5 +1,6 @@
 import {
   ButtonItem,
+  DropdownItem,
   PanelSection,
   PanelSectionRow,
   staticClasses,
@@ -13,19 +14,56 @@ import trophyImage from "../assets/platinum.png";
 const CONCURRENT_REQUESTS = 5;
 const STYLE_ID = "completionist-overlay-style";
 
-// Python backend RPCs (see main.py)
+// ---------- Settings types & constants ----------
+
+type Corner = "top-right" | "top-left" | "bottom-right" | "bottom-left";
+type Size = "small" | "medium" | "large";
+
+interface Settings {
+  corner: Corner;
+  size: Size;
+}
+
+const DEFAULT_SETTINGS: Settings = {
+  corner: "top-right",
+  size: "medium",
+};
+
+const SIZE_DIMENSIONS: Record<Size, { w: number; h: number }> = {
+  small: { w: 22, h: 28 },
+  medium: { w: 28, h: 35 },
+  large: { w: 32, h: 40 },
+};
+
+const CORNER_POSITION_CSS: Record<Corner, string> = {
+  "top-right": "top: 4px; right: 4px;",
+  "top-left": "top: 4px; left: 4px;",
+  "bottom-right": "bottom: 4px; right: 4px;",
+  "bottom-left": "bottom: 4px; left: 4px;",
+};
+
+const CORNER_TRANSFORM_ORIGIN: Record<Corner, string> = {
+  "top-right": "top right",
+  "top-left": "top left",
+  "bottom-right": "bottom right",
+  "bottom-left": "bottom left",
+};
+
+// ---------- Python RPCs ----------
+
 const getPlatinums = callable<[], number[]>("get_platinums");
 const setPlatinums = callable<[appids: number[]], boolean>("set_platinums");
+const getSettings = callable<[], Settings>("get_settings");
+const setSettings = callable<[settings: Settings], boolean>("set_settings");
 
-// ---------- Module-level shared scan state ----------
-// One source of truth that both the auto-scan-on-init and the Refresh button
-// read from. Any subscriber (the Content panel) is notified on every change.
+// ---------- Module-level shared state ----------
 
 interface ScanState {
   scanning: boolean;
   progress: { scanned: number; total: number; found: number } | null;
   results: SteamApp[];
   error: string | null;
+  settings: Settings;
 }
 
 const state: ScanState = {
@@ -33,6 +71,7 @@ const state: ScanState = {
   progress: null,
   results: [],
   error: null,
+  settings: { ...DEFAULT_SETTINGS },
 };
 
 const listeners = new Set<() => void>();
@@ -46,7 +85,11 @@ function notify() {
   for (const l of listeners) l();
 }
 
-// Single in-flight scan promise — a second caller joins instead of duplicating.
+// Authoritative copy of the current platinum appid set, separate from the
+// React state's `results` (which carries display data from the latest scan
+// but stays empty on cold start where we only have a cached id list).
+let currentPlatinumAppIds: number[] = [];
+
 let activeScan: Promise<SteamApp[]> | null = null;
 
 function runScan(): Promise<SteamApp[]> {
@@ -63,11 +106,11 @@ function runScan(): Promise<SteamApp[]> {
     .then((results) => {
       state.results = results;
       state.progress = null;
-      installOverlayStyle(results.map((a) => a.appid));
-      setPlatinums(results.map((a) => a.appid)).catch((e) =>
-        console.error("Completionist: setPlatinums failed:", e)
+      currentPlatinumAppIds = results.map((a) => a.appid);
+      installOverlayStyle(currentPlatinumAppIds, state.settings);
+      setPlatinums(currentPlatinumAppIds).catch((e) =>
+        console.error("Completionist: setPlatinums failed:", e),
       );
-      console.log(`Completionist: scan saved ${results.length} platinum(s) to disk`);
       return results;
     })
     .catch((e) => {
@@ -83,10 +126,19 @@ function runScan(): Promise<SteamApp[]> {
   return activeScan;
 }
 
+function updateSettings(partial: Partial<Settings>) {
+  state.settings = { ...state.settings, ...partial };
+  notify();
+  setSettings(state.settings).catch((e) =>
+    console.error("Completionist: setSettings failed:", e),
+  );
+  installOverlayStyle(currentPlatinumAppIds, state.settings);
+}
+
 // ---------- Scanner ----------
 
 async function scanPlatinums(
-  onProgress: (scanned: number, total: number, found: number) => void
+  onProgress: (scanned: number, total: number, found: number) => void,
 ): Promise<SteamApp[]> {
   const cache = window.appAchievementProgressCache;
   const apps = [...window.appStore.allApps];
@@ -116,13 +168,15 @@ async function scanPlatinums(
     }
   }
 
-  await Promise.all(Array.from({ length: CONCURRENT_REQUESTS }, () => worker()));
+  await Promise.all(
+    Array.from({ length: CONCURRENT_REQUESTS }, () => worker()),
+  );
   return platinums.sort((a, b) => a.display_name.localeCompare(b.display_name));
 }
 
 // ---------- CSS overlay ----------
 
-function installOverlayStyle(platinumAppIds: number[] = []) {
+function installOverlayStyle(platinumAppIds: number[], settings: Settings) {
   const doc = findSP().window.document;
   let el = doc.getElementById(STYLE_ID) as HTMLStyleElement | null;
   if (!el) {
@@ -136,15 +190,14 @@ function installOverlayStyle(platinumAppIds: number[] = []) {
     return;
   }
 
+  const { w, h } = SIZE_DIMENSIONS[settings.size];
+  const positionCSS = CORNER_POSITION_CSS[settings.corner];
+  const origin = CORNER_TRANSFORM_ORIGIN[settings.corner];
+
   // For each platinum game, target the .Panel that's a direct parent of
   // a role=link containing the matching img. On home this matches the inner
-  // tilting Panel (so the trophy tilts with the card). On library it matches
-  // the outer tile wrapper. Single selector pattern covers both surfaces.
-  // Four img-src patterns observed in the wild:
-  //   /apps/<appid>/...           — Steam CDN URL
-  //   /assets/<appid>/...         — steamloopback.host local cache
-  //   /customimages/<appid>p.png  — SteamGridDB portrait custom art
-  //   /customimages/<appid>l.png  — SteamGridDB landscape custom art
+  // tilting Panel; on library it matches the outer tile wrapper. Single
+  // pattern covers both surfaces.
   const baseSelectors = platinumAppIds.flatMap((id) => [
     `.Panel:has(> [role="link"] img[src*="/apps/${id}/"])`,
     `.Panel:has(> [role="link"] img[src*="/assets/${id}/"])`,
@@ -153,6 +206,9 @@ function installOverlayStyle(platinumAppIds: number[] = []) {
   ]);
   const positionSel = baseSelectors.join(",\n");
   const afterSel = baseSelectors.map((s) => `${s}::after`).join(",\n");
+  const focusSel = baseSelectors
+    .map((s) => `${s}:focus-within::after`)
+    .join(",\n");
 
   el.textContent = `
     ${positionSel} {
@@ -161,13 +217,17 @@ function installOverlayStyle(platinumAppIds: number[] = []) {
     ${afterSel} {
       content: "";
       position: absolute;
-      top: 4px;
-      right: 4px;
-      width: 32px;
-      height: 40px;
+      ${positionCSS}
+      width: ${w}px;
+      height: ${h}px;
       background: url("${trophyImage}") center / contain no-repeat;
       z-index: 50;
       pointer-events: none;
+      transform-origin: ${origin};
+      transition: transform 0.4s cubic-bezier(0, 0.73, 0.48, 1);
+    }
+    ${focusSel} {
+      transform: scale(1.15);
     }
   `;
 }
@@ -182,62 +242,80 @@ function removeOverlayStyle() {
 
 // ---------- React panel ----------
 
+const CORNER_OPTIONS = [
+  { data: "top-right", label: "Top Right" },
+  { data: "top-left", label: "Top Left" },
+  { data: "bottom-right", label: "Bottom Right" },
+  { data: "bottom-left", label: "Bottom Left" },
+];
+
+const SIZE_OPTIONS = [
+  { data: "small", label: "Small" },
+  { data: "medium", label: "Medium" },
+  { data: "large", label: "Large" },
+];
+
 function Content() {
-  // useReducer forces a re-render whenever the module state notifies us.
   const [, force] = useReducer((x: number) => x + 1, 0);
   useEffect(() => subscribe(force), []);
 
-  const visible = state.results.slice(0, 20);
-  const hidden = state.results.length - visible.length;
-
   return (
-    <PanelSection title="Completionist">
-      <PanelSectionRow>
-        <ButtonItem
-          layout="below"
-          onClick={() => runScan()}
-          disabled={state.scanning}
-        >
-          {state.scanning ? "Scanning..." : "Refresh"}
-        </ButtonItem>
-      </PanelSectionRow>
-
-      {state.progress && (
+    <>
+      <PanelSection title="Display">
         <PanelSectionRow>
-          <div>
-            {state.progress.scanned} / {state.progress.total} checked ·{" "}
-            {state.progress.found} platinum
-          </div>
+          <DropdownItem
+            label="Position"
+            rgOptions={CORNER_OPTIONS}
+            selectedOption={state.settings.corner}
+            onChange={(opt) => updateSettings({ corner: opt.data as Corner })}
+          />
         </PanelSectionRow>
-      )}
-
-      {state.error && (
         <PanelSectionRow>
-          <div style={{ color: "tomato" }}>Error: {state.error}</div>
+          <DropdownItem
+            label="Size"
+            rgOptions={SIZE_OPTIONS}
+            selectedOption={state.settings.size}
+            onChange={(opt) => updateSettings({ size: opt.data as Size })}
+          />
         </PanelSectionRow>
-      )}
+      </PanelSection>
 
-      {!state.scanning && state.results.length > 0 && (
+      <PanelSection title="Scan">
         <PanelSectionRow>
-          <div style={{ fontWeight: "bold" }}>
-            {state.results.length} platinum game{state.results.length === 1 ? "" : "s"}:
-          </div>
+          <ButtonItem
+            layout="below"
+            onClick={() => runScan()}
+            disabled={state.scanning}
+          >
+            {state.scanning ? "Scanning..." : "Refresh"}
+          </ButtonItem>
         </PanelSectionRow>
-      )}
 
-      {!state.scanning &&
-        visible.map((app) => (
-          <PanelSectionRow key={app.appid}>
-            <div>{app.display_name}</div>
+        {state.progress && (
+          <PanelSectionRow>
+            <div>
+              {state.progress.scanned} / {state.progress.total} checked ·{" "}
+              {state.progress.found} platinum
+            </div>
           </PanelSectionRow>
-        ))}
+        )}
 
-      {!state.scanning && hidden > 0 && (
-        <PanelSectionRow>
-          <div style={{ opacity: 0.6 }}>… and {hidden} more</div>
-        </PanelSectionRow>
-      )}
-    </PanelSection>
+        {state.error && (
+          <PanelSectionRow>
+            <div style={{ color: "tomato" }}>Error: {state.error}</div>
+          </PanelSectionRow>
+        )}
+
+        {!state.scanning && state.results.length > 0 && (
+          <PanelSectionRow>
+            <div>
+              {state.results.length} platinum game
+              {state.results.length === 1 ? "" : "s"} detected
+            </div>
+          </PanelSectionRow>
+        )}
+      </PanelSection>
+    </>
   );
 }
 
@@ -246,21 +324,25 @@ function Content() {
 export default definePlugin(() => {
   console.log("Completionist initializing");
 
-  // 1. Apply cached platinums from disk immediately (instant trophies on boot).
-  // 2. Then kick off a background scan to catch any new platinums.
-  // Both share the module-level lock + state, so the Content panel shows
-  // progress regardless of which path triggered the work.
-  getPlatinums()
-    .then((cached) => {
+  // 1. Load settings + cached platinums in parallel.
+  // 2. Apply CSS immediately so trophies appear instantly on boot.
+  // 3. Kick off a background scan to catch new platinums.
+  Promise.all([getSettings(), getPlatinums()])
+    .then(([settings, cached]) => {
+      state.settings = { ...DEFAULT_SETTINGS, ...settings };
+      notify();
       if (cached.length > 0) {
-        installOverlayStyle(cached);
-        console.log(`Completionist: applied ${cached.length} cached platinum(s) instantly`);
+        currentPlatinumAppIds = cached;
+        installOverlayStyle(cached, state.settings);
+        console.log(
+          `Completionist: applied ${cached.length} cached platinum(s) instantly`,
+        );
       }
     })
-    .catch((e) => console.error("Completionist: getPlatinums failed:", e))
+    .catch((e) => console.error("Completionist: init load failed:", e))
     .finally(() => {
       runScan().catch((e) =>
-        console.error("Completionist: background scan failed:", e)
+        console.error("Completionist: background scan failed:", e),
       );
     });
 
