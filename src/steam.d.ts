@@ -18,22 +18,12 @@ interface SteamRegistrationHandle {
 }
 
 interface Window {
-  appStore: {
-    allApps: SteamApp[];
-  };
   appAchievementProgressCache: {
     BGameHasAchievements(appid: number): boolean;
     GetAchievementProgress(appid: number): number;
     RequestCacheUpdate(appid: number): Promise<unknown>;
     m_achievementProgress: {
       mapCache: Map<number, AchievementCacheEntry>;
-    };
-  };
-  SteamClient: {
-    Apps: {
-      RegisterForAchievementChanges(
-        callback: (...args: unknown[]) => void
-      ): SteamRegistrationHandle;
     };
   };
 }
