@@ -3,31 +3,41 @@ import {
   DropdownItem,
   PanelSection,
   PanelSectionRow,
-  staticClasses,
   findSP,
 } from "@decky/ui";
-import { definePlugin, callable } from "@decky/api";
+import {
+  definePlugin,
+  callable,
+  openFilePicker,
+  FileSelectionType,
+} from "@decky/api";
 import { useEffect, useReducer } from "react";
 import { FaTrophy } from "react-icons/fa";
 import trophyImage from "../assets/platinum.png";
+import steamCompletedImage from "../assets/steam-completed.svg";
 
-const CONCURRENT_REQUESTS = 5;
+const REQUEST_BATCH_SIZE = 100;
 const STYLE_ID = "completionist-overlay-style";
 
 // ---------- Settings types & constants ----------
 
 type Corner = "top-right" | "top-left" | "bottom-right" | "bottom-left";
 type Size = "small" | "medium" | "large";
+type IconChoice = "platinum" | "steam" | "custom";
 
 interface Settings {
   corner: Corner;
   size: Size;
+  icon: IconChoice;
 }
 
 const DEFAULT_SETTINGS: Settings = {
-  corner: "top-right",
-  size: "medium",
+  corner: "bottom-left",
+  size: "small",
+  icon: "steam",
 };
+
+const CUSTOM_ICON_EXTENSIONS = ["png", "jpg", "jpeg", "gif", "webp", "svg"];
 
 const SIZE_DIMENSIONS: Record<Size, { w: number; h: number }> = {
   small: { w: 22, h: 28 },
@@ -42,19 +52,14 @@ const CORNER_POSITION_CSS: Record<Corner, string> = {
   "bottom-left": "bottom: 4px; left: 4px;",
 };
 
-const CORNER_TRANSFORM_ORIGIN: Record<Corner, string> = {
-  "top-right": "top right",
-  "top-left": "top left",
-  "bottom-right": "bottom right",
-  "bottom-left": "bottom left",
-};
-
 // ---------- Python RPCs ----------
 
 const getPlatinums = callable<[], number[]>("get_platinums");
 const setPlatinums = callable<[appids: number[]], boolean>("set_platinums");
 const getSettings = callable<[], Settings>("get_settings");
 const setSettings = callable<[settings: Settings], boolean>("set_settings");
+const getCustomIcon = callable<[], string>("get_custom_icon");
+const setCustomIcon = callable<[source: string], string>("set_custom_icon");
 
 // ---------- Module-level shared state ----------
 
@@ -64,6 +69,8 @@ interface ScanState {
   results: SteamApp[];
   error: string | null;
   settings: Settings;
+  customIconUrl: string;
+  iconError: string | null;
 }
 
 const state: ScanState = {
@@ -72,7 +79,17 @@ const state: ScanState = {
   results: [],
   error: null,
   settings: { ...DEFAULT_SETTINGS },
+  customIconUrl: "",
+  iconError: null,
 };
+
+function resolveIconUrl(settings: Settings): string {
+  if (settings.icon === "custom" && state.customIconUrl) {
+    return state.customIconUrl;
+  }
+  if (settings.icon === "platinum") return trophyImage;
+  return steamCompletedImage;
+}
 
 const listeners = new Set<() => void>();
 function subscribe(l: () => void): () => void {
@@ -85,9 +102,6 @@ function notify() {
   for (const l of listeners) l();
 }
 
-// Authoritative copy of the current platinum appid set, separate from the
-// React state's `results` (which carries display data from the latest scan
-// but stays empty on cold start where we only have a cached id list).
 let currentPlatinumAppIds: number[] = [];
 
 let activeScan: Promise<SteamApp[]> | null = null;
@@ -135,6 +149,36 @@ function updateSettings(partial: Partial<Settings>) {
   installOverlayStyle(currentPlatinumAppIds, state.settings);
 }
 
+async function chooseCustomIcon() {
+  let picked: string;
+  try {
+    const res = await openFilePicker(
+      FileSelectionType.FILE,
+      "/home/deck",
+      true,
+      false,
+      undefined,
+      CUSTOM_ICON_EXTENSIONS,
+    );
+    picked = res.realpath || res.path;
+  } catch {
+    return;
+  }
+  const url = await setCustomIcon(picked).catch((e) => {
+    console.error("Completionist: setCustomIcon failed:", e);
+    return "";
+  });
+  if (!url) {
+    state.iconError =
+      "Couldn't use that image. Pick a PNG, JPG, GIF, WEBP or SVG under 2 MB.";
+    notify();
+    return;
+  }
+  state.customIconUrl = url;
+  state.iconError = null;
+  updateSettings({ icon: "custom" });
+}
+
 // ---------- Scanner ----------
 
 async function scanPlatinums(
@@ -144,33 +188,27 @@ async function scanPlatinums(
   const apps = [...window.appStore.allApps];
   const total = apps.length;
   const platinums: SteamApp[] = [];
+  const progressMap = () => cache.m_achievementProgress?.mapCache;
 
-  let idx = 0;
-  let scanned = 0;
-
-  async function worker() {
-    while (idx < total) {
-      const myIdx = idx++;
-      const app = apps[myIdx];
-      try {
-        if (cache.BGameHasAchievements(app.appid)) {
-          if (!cache.m_achievementProgress.mapCache.has(app.appid)) {
-            await cache.RequestCacheUpdate(app.appid);
-          }
-          const entry = cache.m_achievementProgress.mapCache.get(app.appid);
-          if (entry?.all_unlocked) platinums.push(app);
-        }
-      } catch {
-        // per-app failures shouldn't abort the scan
+  for (let start = 0; start < total; start += REQUEST_BATCH_SIZE) {
+    const batch = apps.slice(start, start + REQUEST_BATCH_SIZE);
+    const missing = batch.filter((app) => !progressMap()?.has(app.appid));
+    if (missing.length > 0) {
+      for (const app of missing) {
+        cache.m_mapQueuedCacheMisses.set(app.appid, true);
       }
-      scanned++;
-      onProgress(scanned, total, platinums.length);
+      try {
+        await cache.RequestCacheUpdate();
+      } catch (e) {
+        console.error("Completionist: RequestCacheUpdate failed:", e);
+      }
     }
+    for (const app of batch) {
+      if (progressMap()?.get(app.appid)?.all_unlocked) platinums.push(app);
+    }
+    onProgress(start + batch.length, total, platinums.length);
   }
 
-  await Promise.all(
-    Array.from({ length: CONCURRENT_REQUESTS }, () => worker()),
-  );
   return platinums.sort((a, b) => a.display_name.localeCompare(b.display_name));
 }
 
@@ -192,42 +230,26 @@ function installOverlayStyle(platinumAppIds: number[], settings: Settings) {
 
   const { w, h } = SIZE_DIMENSIONS[settings.size];
   const positionCSS = CORNER_POSITION_CSS[settings.corner];
-  const origin = CORNER_TRANSFORM_ORIGIN[settings.corner];
 
-  // For each platinum game, target the .Panel that's a direct parent of
-  // a role=link containing the matching img. On home this matches the inner
-  // tilting Panel; on library it matches the outer tile wrapper. Single
-  // pattern covers both surfaces.
-  const baseSelectors = platinumAppIds.flatMap((id) => [
-    `.Panel:has(> [role="link"] img[src*="/apps/${id}/"])`,
-    `.Panel:has(> [role="link"] img[src*="/assets/${id}/"])`,
-    `.Panel:has(> [role="link"] img[src*="/customimages/${id}p"])`,
-    `.Panel:has(> [role="link"] img[src*="/customimages/${id}l"])`,
-  ]);
-  const positionSel = baseSelectors.join(",\n");
-  const afterSel = baseSelectors.map((s) => `${s}::after`).join(",\n");
-  const focusSel = baseSelectors
-    .map((s) => `${s}:focus-within::after`)
+  const afterSel = platinumAppIds
+    .flatMap((id) => [
+      `[role="link"] > :has(img[src*="/apps/${id}/"])::after`,
+      `[role="link"] > :has(img[src*="/assets/${id}/"])::after`,
+      `[role="link"] > :has(img[src*="/customimages/${id}p"])::after`,
+      `[role="link"] > :has(img[src*="/customimages/${id}l"])::after`,
+    ])
     .join(",\n");
 
   el.textContent = `
-    ${positionSel} {
-      position: relative;
-    }
     ${afterSel} {
       content: "";
       position: absolute;
       ${positionCSS}
       width: ${w}px;
       height: ${h}px;
-      background: url("${trophyImage}") center / contain no-repeat;
+      background: url("${resolveIconUrl(settings)}") center / contain no-repeat;
       z-index: 50;
       pointer-events: none;
-      transform-origin: ${origin};
-      transition: transform 0.4s cubic-bezier(0, 0.73, 0.48, 1);
-    }
-    ${focusSel} {
-      transform: scale(1.15);
     }
   `;
 }
@@ -297,6 +319,12 @@ const SIZE_OPTIONS = [
   { data: "large", label: "Large" },
 ];
 
+const ICON_OPTIONS = [
+  { data: "steam", label: "Steam Completed" },
+  { data: "platinum", label: "Platinum Trophy" },
+  { data: "custom", label: "Custom Image" },
+];
+
 function Content() {
   const [, force] = useReducer((x: number) => x + 1, 0);
   useEffect(() => subscribe(force), []);
@@ -306,6 +334,49 @@ function Content() {
       <PanelSection title="Display">
         <PanelSectionRow>
           <DropdownItem
+            layout="below"
+            label="Icon"
+            rgOptions={ICON_OPTIONS}
+            selectedOption={state.settings.icon}
+            onChange={(opt) => {
+              const icon = opt.data as IconChoice;
+              if (icon === "custom" && !state.customIconUrl) {
+                chooseCustomIcon();
+                return;
+              }
+              updateSettings({ icon });
+            }}
+          />
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "center",
+              padding: "4px 0",
+            }}
+          >
+            <img
+              src={resolveIconUrl(state.settings)}
+              style={{ height: "48px", maxWidth: "96px", objectFit: "contain" }}
+            />
+          </div>
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <ButtonItem layout="below" onClick={() => chooseCustomIcon()}>
+            {state.customIconUrl
+              ? "Change Custom Image"
+              : "Choose Custom Image"}
+          </ButtonItem>
+        </PanelSectionRow>
+        {state.iconError && (
+          <PanelSectionRow>
+            <div style={{ color: "tomato" }}>{state.iconError}</div>
+          </PanelSectionRow>
+        )}
+        <PanelSectionRow>
+          <DropdownItem
+            layout="below"
             label="Position"
             rgOptions={CORNER_OPTIONS}
             selectedOption={state.settings.corner}
@@ -314,6 +385,7 @@ function Content() {
         </PanelSectionRow>
         <PanelSectionRow>
           <DropdownItem
+            layout="below"
             label="Size"
             rgOptions={SIZE_OPTIONS}
             selectedOption={state.settings.size}
@@ -337,7 +409,7 @@ function Content() {
           <PanelSectionRow>
             <div>
               {state.progress.scanned} / {state.progress.total} checked ·{" "}
-              {state.progress.found} platinum
+              {state.progress.found} perfect
             </div>
           </PanelSectionRow>
         )}
@@ -351,7 +423,7 @@ function Content() {
         {!state.scanning && state.results.length > 0 && (
           <PanelSectionRow>
             <div>
-              {state.results.length} platinum game
+              {state.results.length} perfect game
               {state.results.length === 1 ? "" : "s"} detected
             </div>
           </PanelSectionRow>
@@ -366,15 +438,16 @@ function Content() {
 export default definePlugin(() => {
   console.log("Completionist initializing");
 
-  Promise.all([getSettings(), getPlatinums()])
-    .then(([settings, cached]) => {
+  Promise.all([getSettings(), getPlatinums(), getCustomIcon().catch(() => "")])
+    .then(([settings, cached, customIconUrl]) => {
       state.settings = { ...DEFAULT_SETTINGS, ...settings };
+      state.customIconUrl = customIconUrl;
       notify();
       if (cached.length > 0) {
         currentPlatinumAppIds = cached;
         installOverlayStyle(cached, state.settings);
         console.log(
-          `Completionist: applied ${cached.length} cached platinum(s) instantly`,
+          `Completionist: applied ${cached.length} cached perfect game(s) instantly`,
         );
       }
     })
@@ -388,7 +461,7 @@ export default definePlugin(() => {
 
   return {
     name: "Completionist",
-    titleView: <div className={staticClasses.Title}>Completionist</div>,
+    titleView: <div>Completionist</div>,
     content: <Content />,
     icon: <FaTrophy />,
     onDismount() {

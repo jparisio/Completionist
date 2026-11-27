@@ -5,7 +5,7 @@
   "api_version": 1,
   "publish": {
     "tags": ["achievements", "completion", "library", "qol"],
-    "description": "Displays a platinum trophy on the tiles of Steam games you've 100% completed. Detection runs automatically against Steam's local achievement data — no API key, no setup. Position and size are configurable.",
+    "description": "Displays a badge on the tiles of Steam games you've 100% completed. Choose Steam's Completed icon, a platinum trophy, or your own image. Detection runs automatically against Steam's local achievement data — no API key, no setup. Position and size are configurable.",
     "image": "https://raw.githubusercontent.com/jparisio/Completionist/main/assets/store-banner.png"
   }
 }

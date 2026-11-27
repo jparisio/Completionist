@@ -21,8 +21,9 @@ interface Window {
   appAchievementProgressCache: {
     BGameHasAchievements(appid: number): boolean;
     GetAchievementProgress(appid: number): number;
-    RequestCacheUpdate(appid: number): Promise<unknown>;
-    m_achievementProgress: {
+    RequestCacheUpdate(): Promise<void>;
+    m_mapQueuedCacheMisses: Map<number, boolean>;
+    m_achievementProgress?: {
       mapCache: Map<number, AchievementCacheEntry>;
     };
   };
